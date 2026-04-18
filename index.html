@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>HWP 표 변환기</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://unpkg.com/cfb@1.2.2/dist/cfb.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
   <style>
     :root {
       --bg: #f8f9fa;
@@ -325,15 +327,15 @@
 
 <header>
   <h1>HWP 표 변환기</h1>
-  <span class="subtitle">한글(.hwpx) 파일의 표를 HTML · 마크다운 · AI 프롬프트로 변환</span>
+  <span class="subtitle">한글(.hwp / .hwpx) 파일의 표를 HTML · 마크다운 · AI 프롬프트로 변환</span>
   <button id="reset-btn" class="btn outline">다른 파일 열기</button>
 </header>
 
 <div id="upload-section">
   <div id="drop-zone">
     <div class="dz-icon">📄</div>
-    <strong>.hwpx 파일을 여기에 드래그하거나</strong>
-    <p>한글 2010 이상 버전의 .hwpx 파일을 지원합니다</p>
+    <strong>.hwp / .hwpx 파일을 여기에 드래그하거나</strong>
+    <p>.hwp (한글 97~) · .hwpx (한글 2010~) 모두 지원합니다</p>
     <label for="file-input" class="btn">파일 선택</label>
     <input type="file" id="file-input" accept=".hwpx,.hwp">
   </div>
@@ -420,21 +422,21 @@ resetBtn.addEventListener('click', () => {
 
 // ── Main entry ────────────────────────────────────────────────────────────────
 async function handleFile(file) {
-  if (file.name.endsWith('.hwp') && !file.name.endsWith('.hwpx')) {
-    showError('구형 .hwp 파일은 지원하지 않습니다. 한글에서 "다른 이름으로 저장 → .hwpx"로 저장 후 시도해 주세요.');
-    return;
-  }
-  if (!file.name.endsWith('.hwpx')) {
-    showError('.hwpx 파일만 지원합니다.');
+  const name = file.name.toLowerCase();
+  const isHwpx = name.endsWith('.hwpx');
+  const isHwp  = !isHwpx && name.endsWith('.hwp');
+
+  if (!isHwpx && !isHwp) {
+    showError('.hwp 또는 .hwpx 파일만 지원합니다.');
     return;
   }
 
   try {
     const buffer = await file.arrayBuffer();
-    tables = await parseHwpx(buffer);
+    tables = isHwpx ? await parseHwpx(buffer) : await parseHwp(buffer);
 
     if (tables.length === 0) {
-      showError('이 파일에서 표를 찾지 못했습니다. 표가 포함된 .hwpx 파일인지 확인해 주세요.');
+      showError('이 파일에서 표를 찾지 못했습니다. 표가 포함된 파일인지 확인해 주세요.');
       return;
     }
 
@@ -548,6 +550,150 @@ function extractCellText(tcEl) {
 
   for (const child of tcEl.childNodes) walk(child);
   return parts.join('').trim();
+}
+
+// ── HWP (binary OLE2) Parsing ─────────────────────────────────────────────────
+async function parseHwp(buffer) {
+  if (typeof CFB === 'undefined') throw new Error('CFB 라이브러리 로드 실패. 네트워크 연결을 확인해 주세요.');
+  if (typeof pako === 'undefined') throw new Error('pako 라이브러리 로드 실패. 네트워크 연결을 확인해 주세요.');
+
+  let cfb;
+  try {
+    cfb = CFB.read(new Uint8Array(buffer), { type: 'array' });
+  } catch (e) {
+    throw new Error('OLE2 구조 파싱 실패. 유효한 .hwp 파일인지 확인해 주세요.');
+  }
+
+  // Validate HWP signature
+  const hdrEntry = CFB.find(cfb, '/FileHeader');
+  if (!hdrEntry || !hdrEntry.content) throw new Error('HWP FileHeader를 찾을 수 없습니다.');
+
+  const hdrBytes = hdrEntry.content;
+  const sig = String.fromCharCode(...hdrBytes.slice(0, 17));
+  if (sig !== 'HWP Document File') throw new Error('HWP 파일 서명이 올바르지 않습니다.');
+
+  // Compression flag at offset 36 (uint32 LE), bit 0 = compressed
+  const flags = new DataView(hdrBytes.buffer, hdrBytes.byteOffset + 36, 4).getUint32(0, true);
+  const isCompressed = (flags & 0x1) !== 0;
+
+  const result = [];
+  for (let idx = 0; idx < 512; idx++) {
+    const entry = CFB.find(cfb, `/BodyText/Section${idx}`);
+    if (!entry || !entry.content || entry.content.length === 0) break;
+
+    let data = entry.content;
+    if (isCompressed) {
+      try { data = pako.inflate(data); }
+      catch (e) { console.warn(`Section${idx} 압축 해제 실패`, e); continue; }
+    }
+
+    result.push(...hwpSectionTables(data));
+  }
+  return result;
+}
+
+// Parse decompressed HWP section binary → array of tables
+function hwpSectionTables(uint8) {
+  // HWP record header (uint32 LE):  bits[9:0]=tagId  bits[13:10]=level  bits[31:14]=size
+  const TAG_PARA_TEXT   = 67;  // HWPTAG_PARA_TEXT
+  const TAG_CTRL_HEADER = 71;  // HWPTAG_CTRL_HEADER
+  const TAG_LIST_HEADER = 72;  // HWPTAG_LIST_HEADER
+  // ctrl_id 'tbl ' stored as LE uint32 from bytes [0x74,0x62,0x6C,0x20]
+  const CTRL_TABLE = 0x206C6274;
+
+  // 1. Parse record list
+  const recs = [];
+  const view = new DataView(uint8.buffer, uint8.byteOffset, uint8.byteLength);
+  let pos = 0;
+  while (pos + 4 <= uint8.length) {
+    const h = view.getUint32(pos, true); pos += 4;
+    const tagId = h & 0x3FF;
+    const level = (h >> 10) & 0xF;
+    let size = h >> 14;
+    if (size === 0x3FFFF) {
+      if (pos + 4 > uint8.length) break;
+      size = view.getUint32(pos, true); pos += 4;
+    }
+    if (pos + size > uint8.length) break;
+    recs.push({ tagId, level, off: pos, size });
+    pos += size;
+  }
+
+  // 2. Walk records; extract tables at CTRL_HEADER with table ctrl_id
+  const tables = [];
+  let i = 0;
+  while (i < recs.length) {
+    const rec = recs[i];
+    if (rec.tagId === TAG_CTRL_HEADER && rec.size >= 4) {
+      const ctrlId = new DataView(uint8.buffer, uint8.byteOffset + rec.off, 4).getUint32(0, true);
+      if (ctrlId === CTRL_TABLE) {
+        const tblLevel = rec.level;
+        i++;
+
+        // Look ahead (up to 40 records) to auto-detect which level = rows, which = cells
+        let rowLv = -1, cellLv = -1;
+        for (let k = i; k < Math.min(i + 40, recs.length); k++) {
+          if (recs[k].level <= tblLevel) break;
+          if (recs[k].tagId === TAG_LIST_HEADER) {
+            if (rowLv === -1) { rowLv = recs[k].level; }
+            else if (recs[k].level !== rowLv && cellLv === -1) { cellLv = recs[k].level; }
+          }
+          if (rowLv !== -1 && cellLv !== -1) break;
+        }
+        if (rowLv === -1) continue;
+        if (cellLv === -1) cellLv = rowLv + 1;
+
+        // Build table data
+        const tblData = [];
+        let curRow = null, curCell = null;
+
+        while (i < recs.length && recs[i].level > tblLevel) {
+          const r = recs[i];
+          if (r.tagId === TAG_LIST_HEADER) {
+            if (r.level === rowLv) {
+              if (curCell !== null && curRow !== null) {
+                curRow.push({ text: curCell.join('\n').trim(), rowSpan: 1, colSpan: 1 });
+              }
+              if (curRow !== null && curRow.length > 0) tblData.push(curRow);
+              curRow = []; curCell = null;
+            } else if (r.level === cellLv) {
+              if (curCell !== null && curRow !== null) {
+                curRow.push({ text: curCell.join('\n').trim(), rowSpan: 1, colSpan: 1 });
+              }
+              curCell = [];
+            }
+          } else if (r.tagId === TAG_PARA_TEXT && curCell !== null) {
+            const dv = new DataView(uint8.buffer, uint8.byteOffset + r.off, r.size);
+            const txt = hwpParaText(dv, r.size);
+            if (txt) curCell.push(txt);
+          }
+          i++;
+        }
+
+        // Finalize last cell / row
+        if (curCell !== null && curRow !== null)
+          curRow.push({ text: curCell.join('\n').trim(), rowSpan: 1, colSpan: 1 });
+        if (curRow !== null && curRow.length > 0) tblData.push(curRow);
+
+        if (tblData.length > 0 && tblData[0].length > 0) tables.push(tblData);
+        continue;
+      }
+    }
+    i++;
+  }
+  return tables;
+}
+
+// HWPTAG_PARA_TEXT → string (UTF-16 LE; control chars < 0x20 are skipped)
+function hwpParaText(view, size) {
+  const chars = [];
+  for (let i = 0; i + 1 < size; i += 2) {
+    const ch = view.getUint16(i, true);
+    if (ch === 0x0000) break;
+    if (ch >= 0x0020) chars.push(String.fromCharCode(ch));
+    else if (ch === 0x000A || ch === 0x000D) chars.push('\n');
+  }
+  return chars.join('').trim();
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
