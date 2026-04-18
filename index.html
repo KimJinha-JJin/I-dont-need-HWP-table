@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HWP 표 변환기</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    :root {
+      --bg: #f8f9fa;
+      --surface: #ffffff;
+      --border: #dee2e6;
+      --primary: #4A90D9;
+      --primary-light: #e8f0fe;
+      --text: #212529;
+      --text-muted: #6c757d;
+      --success: #28a745;
+      --sidebar-width: 200px;
+      --header-h: 57px;
+      --upload-h: 160px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      height: var(--header-h);
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header h1 { font-size: 17px; font-weight: 700; }
+    header .subtitle { color: var(--text-muted); font-size: 13px; }
+
+    #reset-btn {
+      margin-left: auto;
+      display: none;
+    }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-block;
+      padding: 7px 18px;
+      border-radius: 6px;
+      border: 1.5px solid var(--primary);
+      background: var(--primary);
+      color: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: opacity 0.15s;
+      text-align: center;
+    }
+
+    .btn:hover { opacity: 0.85; }
+
+    .btn.outline {
+      background: transparent;
+      color: var(--primary);
+    }
+
+    .btn.success {
+      background: var(--success);
+      border-color: var(--success);
+    }
+
+    /* ── Upload Zone ── */
+    #upload-section {
+      padding: 40px 24px;
+      display: flex;
+      justify-content: center;
+    }
+
+    #drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: 14px;
+      padding: 48px 72px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      background: var(--surface);
+      max-width: 560px;
+      width: 100%;
+    }
+
+    #drop-zone:hover,
+    #drop-zone.dragover {
+      border-color: var(--primary);
+      background: var(--primary-light);
+    }
+
+    #drop-zone .dz-icon { font-size: 48px; margin-bottom: 14px; }
+    #drop-zone strong { display: block; font-size: 16px; margin-bottom: 6px; }
+    #drop-zone p { color: var(--text-muted); font-size: 13px; margin-bottom: 18px; }
+
+    #file-input { display: none; }
+
+    /* ── App Layout ── */
+    #app {
+      display: none;
+      height: calc(100vh - var(--header-h));
+    }
+
+    #app.visible {
+      display: grid;
+      grid-template-columns: var(--sidebar-width) 1fr;
+    }
+
+    /* ── Sidebar ── */
+    #sidebar {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #sidebar-header {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    #sidebar-header h2 {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    #table-count {
+      font-size: 11px;
+      background: var(--primary);
+      color: #fff;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 600;
+    }
+
+    #table-list { list-style: none; padding: 6px 0; }
+
+    #table-list li {
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      border-left: 3px solid transparent;
+      transition: background 0.1s, border-color 0.1s;
+    }
+
+    #table-list li:hover { background: var(--bg); }
+
+    #table-list li.active {
+      background: var(--primary-light);
+      border-left-color: var(--primary);
+      color: var(--primary);
+      font-weight: 600;
+    }
+
+    #table-list li .tbl-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+
+    #table-list li.active .tbl-meta { color: var(--primary); opacity: 0.7; }
+
+    /* ── Main Panel ── */
+    #main-panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Preview ── */
+    #table-preview {
+      flex: 1;
+      overflow: auto;
+      padding: 24px;
+    }
+
+    #preview-title {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 16px;
+    }
+
+    #rendered-table { overflow-x: auto; }
+
+    #rendered-table table {
+      border-collapse: collapse;
+      font-size: 13px;
+      background: var(--surface);
+      box-shadow: 0 1px 6px rgba(0,0,0,0.08);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    #rendered-table th,
+    #rendered-table td {
+      border: 1px solid var(--border);
+      padding: 9px 13px;
+      text-align: left;
+      vertical-align: top;
+      white-space: pre-wrap;
+      min-width: 60px;
+    }
+
+    #rendered-table th {
+      background: #f1f3f5;
+      font-weight: 700;
+    }
+
+    #rendered-table tr:hover td { background: #fafbfc; }
+
+    .empty-state {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      gap: 8px;
+      font-size: 14px;
+    }
+
+    .empty-state .es-icon { font-size: 40px; }
+
+    /* ── Output Panel ── */
+    #output-panel {
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      height: 270px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #output-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      padding: 0 16px;
+      flex-shrink: 0;
+    }
+
+    .out-tab {
+      padding: 10px 16px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-muted);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+
+    .out-tab:hover { color: var(--text); }
+
+    .out-tab.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+    }
+
+    #output-body {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      padding: 10px 14px 12px;
+      gap: 8px;
+    }
+
+    #code-output {
+      flex: 1;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      border-radius: 6px;
+      padding: 10px 12px;
+      overflow: auto;
+      font-size: 11.5px;
+      font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    #copy-row { display: flex; justify-content: flex-end; }
+    #copy-btn { padding: 6px 16px; font-size: 12px; }
+
+    /* ── Error Toast ── */
+    .error-toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #c62828;
+      color: #fff;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 13px;
+      max-width: 480px;
+      text-align: center;
+      z-index: 100;
+      animation: fadeIn 0.2s;
+    }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateX(-50%) translateY(8px); } }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>HWP 표 변환기</h1>
+  <span class="subtitle">한글(.hwpx) 파일의 표를 HTML · 마크다운 · AI 프롬프트로 변환</span>
+  <button id="reset-btn" class="btn outline">다른 파일 열기</button>
+</header>
+
+<div id="upload-section">
+  <div id="drop-zone">
+    <div class="dz-icon">📄</div>
+    <strong>.hwpx 파일을 여기에 드래그하거나</strong>
+    <p>한글 2010 이상 버전의 .hwpx 파일을 지원합니다</p>
+    <label for="file-input" class="btn">파일 선택</label>
+    <input type="file" id="file-input" accept=".hwpx,.hwp">
+  </div>
+</div>
+
+<div id="app">
+  <aside id="sidebar">
+    <div id="sidebar-header">
+      <h2>감지된 표</h2>
+      <span id="table-count">0</span>
+    </div>
+    <ul id="table-list"></ul>
+  </aside>
+
+  <div id="main-panel">
+    <div id="table-preview">
+      <div class="empty-state" id="empty-hint">
+        <div class="es-icon">👈</div>
+        <span>왼쪽에서 표를 선택하세요</span>
+      </div>
+      <div id="preview-content" style="display:none">
+        <div id="preview-title"></div>
+        <div id="rendered-table"></div>
+      </div>
+    </div>
+
+    <div id="output-panel">
+      <div id="output-tabs">
+        <div class="out-tab active" data-tab="html">HTML</div>
+        <div class="out-tab" data-tab="markdown">마크다운</div>
+        <div class="out-tab" data-tab="ai">AI 프롬프트</div>
+      </div>
+      <div id="output-body">
+        <pre id="code-output"></pre>
+        <div id="copy-row">
+          <button id="copy-btn" class="btn">복사</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+// tables[i] = Array of rows, each row = Array of { text, rowSpan, colSpan }
+let tables = [];
+let selectedIdx = -1;
+let activeTab = 'html';
+
+// ── DOM refs ─────────────────────────────────────────────────────────────────
+const uploadSection  = document.getElementById('upload-section');
+const dropZone       = document.getElementById('drop-zone');
+const fileInput      = document.getElementById('file-input');
+const app            = document.getElementById('app');
+const resetBtn       = document.getElementById('reset-btn');
+const tableList      = document.getElementById('table-list');
+const tableCount     = document.getElementById('table-count');
+const emptyHint      = document.getElementById('empty-hint');
+const previewContent = document.getElementById('preview-content');
+const previewTitle   = document.getElementById('preview-title');
+const renderedTable  = document.getElementById('rendered-table');
+const codeOutput     = document.getElementById('code-output');
+const copyBtn        = document.getElementById('copy-btn');
+const outTabs        = document.querySelectorAll('.out-tab');
+
+// ── File events ───────────────────────────────────────────────────────────────
+fileInput.addEventListener('change', e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+
+resetBtn.addEventListener('click', () => {
+  tables = []; selectedIdx = -1;
+  fileInput.value = '';
+  app.classList.remove('visible');
+  uploadSection.style.display = 'flex';
+  resetBtn.style.display = 'none';
+});
+
+// ── Main entry ────────────────────────────────────────────────────────────────
+async function handleFile(file) {
+  if (file.name.endsWith('.hwp') && !file.name.endsWith('.hwpx')) {
+    showError('구형 .hwp 파일은 지원하지 않습니다. 한글에서 "다른 이름으로 저장 → .hwpx"로 저장 후 시도해 주세요.');
+    return;
+  }
+  if (!file.name.endsWith('.hwpx')) {
+    showError('.hwpx 파일만 지원합니다.');
+    return;
+  }
+
+  try {
+    const buffer = await file.arrayBuffer();
+    tables = await parseHwpx(buffer);
+
+    if (tables.length === 0) {
+      showError('이 파일에서 표를 찾지 못했습니다. 표가 포함된 .hwpx 파일인지 확인해 주세요.');
+      return;
+    }
+
+    buildSidebar();
+    uploadSection.style.display = 'none';
+    app.classList.add('visible');
+    resetBtn.style.display = '';
+    selectTable(0);
+  } catch (err) {
+    console.error(err);
+    showError('파일을 읽는 중 오류가 발생했습니다: ' + err.message);
+  }
+}
+
+// ── HWPX Parsing ──────────────────────────────────────────────────────────────
+async function parseHwpx(buffer) {
+  const zip = await JSZip.loadAsync(buffer);
+  const result = [];
+
+  // Collect section XML files (Contents/section0.xml, section1.xml, ...)
+  let sectionFiles = Object.keys(zip.files)
+    .filter(n => /Contents\/section\d+\.xml$/i.test(n))
+    .sort();
+
+  // Fallback: try other common paths
+  if (sectionFiles.length === 0) {
+    const fallbacks = ['word/document.xml', 'Contents/content.xml'];
+    for (const f of fallbacks) if (zip.files[f]) sectionFiles.push(f);
+  }
+
+  // Last resort: any XML that isn't metadata
+  if (sectionFiles.length === 0) {
+    sectionFiles = Object.keys(zip.files)
+      .filter(n => n.endsWith('.xml') && !n.startsWith('META-INF'));
+  }
+
+  for (const filename of sectionFiles) {
+    const xmlStr = await zip.files[filename].async('string');
+    const doc = new DOMParser().parseFromString(xmlStr, 'application/xml');
+    if (doc.querySelector('parsererror')) continue;
+
+    const tblEls = doc.getElementsByTagNameNS('*', 'tbl');
+    for (const tblEl of tblEls) {
+      // Skip nested tables – only process top-level ones
+      if (isNestedTable(tblEl)) continue;
+      const data = extractTableData(tblEl);
+      if (data.length > 0 && data[0].length > 0) result.push(data);
+    }
+  }
+
+  return result;
+}
+
+function isNestedTable(tblEl) {
+  let node = tblEl.parentElement;
+  while (node) {
+    if (node.localName === 'tbl') return true;
+    node = node.parentElement;
+  }
+  return false;
+}
+
+function extractTableData(tblEl) {
+  // Get only direct tr elements (not from nested tables)
+  const allTr = Array.from(tblEl.getElementsByTagNameNS('*', 'tr'));
+  const directTr = allTr.filter(tr => {
+    let p = tr.parentElement;
+    while (p && p !== tblEl) {
+      if (p.localName === 'tbl') return false;
+      p = p.parentElement;
+    }
+    return true;
+  });
+
+  return directTr.map(tr => {
+    const allTc = Array.from(tr.getElementsByTagNameNS('*', 'tc'));
+    const directTc = allTc.filter(tc => {
+      let p = tc.parentElement;
+      while (p && p !== tr) {
+        if (p.localName === 'tbl') return false;
+        p = p.parentElement;
+      }
+      return true;
+    });
+
+    return directTc.map(tc => {
+      const addrEl = tc.getElementsByTagNameNS('*', 'cellAddr')[0];
+      const rowSpan = addrEl ? (parseInt(addrEl.getAttribute('rowSpan')) || 1) : 1;
+      const colSpan = addrEl ? (parseInt(addrEl.getAttribute('colSpan')) || 1) : 1;
+      return { text: extractCellText(tc), rowSpan, colSpan };
+    });
+  });
+}
+
+// Walk cell DOM, collect text, skip nested table content
+function extractCellText(tcEl) {
+  const parts = [];
+  const skipTags = new Set(['cellAddr', 'cellZoneInfo', 'tblPr', 'tcPr']);
+
+  function walk(node) {
+    if (node.nodeType === 3) { // TEXT_NODE
+      parts.push(node.textContent);
+      return;
+    }
+    const name = node.localName;
+    if (name === 'tbl') return; // skip nested table
+    if (name === 'lineBreak' || name === 'br') { parts.push('\n'); return; }
+    if (skipTags.has(name)) return;
+    for (const child of node.childNodes) walk(child);
+  }
+
+  for (const child of tcEl.childNodes) walk(child);
+  return parts.join('').trim();
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+function buildSidebar() {
+  tableCount.textContent = tables.length;
+  tableList.innerHTML = '';
+  tables.forEach((tbl, i) => {
+    const li = document.createElement('li');
+    const rows = tbl.length;
+    const cols = tbl[0]?.length ?? 0;
+    li.innerHTML = `<span>표 ${i + 1}</span><span class="tbl-meta">${rows}행 × ${cols}열</span>`;
+    li.addEventListener('click', () => selectTable(i));
+    tableList.appendChild(li);
+  });
+}
+
+// ── Table Selection ───────────────────────────────────────────────────────────
+function selectTable(idx) {
+  selectedIdx = idx;
+  document.querySelectorAll('#table-list li').forEach((li, i) =>
+    li.classList.toggle('active', i === idx));
+
+  emptyHint.style.display = 'none';
+  previewContent.style.display = '';
+  previewTitle.textContent = `표 ${idx + 1}`;
+  renderedTable.innerHTML = buildPreviewTable(tables[idx]);
+  refreshOutput();
+}
+
+// ── Output Tabs ───────────────────────────────────────────────────────────────
+outTabs.forEach(tab => {
+  tab.addEventListener('click', () => {
+    activeTab = tab.dataset.tab;
+    outTabs.forEach(t => t.classList.toggle('active', t === tab));
+    refreshOutput();
+  });
+});
+
+function refreshOutput() {
+  if (selectedIdx < 0) return;
+  const tbl = tables[selectedIdx];
+  if (activeTab === 'html')     codeOutput.textContent = toHtmlString(tbl);
+  else if (activeTab === 'markdown') codeOutput.textContent = toMarkdown(tbl);
+  else                          codeOutput.textContent = toAiPrompt(tbl, selectedIdx + 1);
+}
+
+// ── Renderers ─────────────────────────────────────────────────────────────────
+function buildPreviewTable(tbl) {
+  let html = '<table>';
+  tbl.forEach((row, ri) => {
+    html += '<tr>';
+    row.forEach(cell => {
+      const tag = ri === 0 ? 'th' : 'td';
+      const rs = cell.rowSpan > 1 ? ` rowspan="${cell.rowSpan}"` : '';
+      const cs = cell.colSpan > 1 ? ` colspan="${cell.colSpan}"` : '';
+      html += `<${tag}${rs}${cs}>${esc(cell.text).replace(/\n/g, '<br>')}</${tag}>`;
+    });
+    html += '</tr>';
+  });
+  return html + '</table>';
+}
+
+function toHtmlString(tbl) {
+  const lines = ['<table>'];
+  tbl.forEach((row, ri) => {
+    lines.push('  <tr>');
+    row.forEach(cell => {
+      const tag = ri === 0 ? 'th' : 'td';
+      const rs = cell.rowSpan > 1 ? ` rowspan="${cell.rowSpan}"` : '';
+      const cs = cell.colSpan > 1 ? ` colspan="${cell.colSpan}"` : '';
+      lines.push(`    <${tag}${rs}${cs}>${esc(cell.text)}</${tag}>`);
+    });
+    lines.push('  </tr>');
+  });
+  lines.push('</table>');
+  return lines.join('\n');
+}
+
+function toMarkdown(tbl) {
+  if (tbl.length === 0) return '';
+  const lines = [];
+  const headerRow = tbl[0].map(c => c.text.replace(/\|/g, '\\|').replace(/\n/g, ' '));
+  lines.push('| ' + headerRow.join(' | ') + ' |');
+  lines.push('| ' + headerRow.map(() => '---').join(' | ') + ' |');
+  for (let i = 1; i < tbl.length; i++) {
+    const row = tbl[i].map(c => c.text.replace(/\|/g, '\\|').replace(/\n/g, ' '));
+    lines.push('| ' + row.join(' | ') + ' |');
+  }
+  return lines.join('\n');
+}
+
+function toAiPrompt(tbl, tableNum) {
+  if (tbl.length === 0) return '';
+  const lines = [`[표 ${tableNum}]`];
+  const hasHeader = tbl.length > 1;
+  const headers = hasHeader ? tbl[0].map(c => c.text || `열${c + 1}`) : null;
+  const dataRows = hasHeader ? tbl.slice(1) : tbl;
+
+  dataRows.forEach((row, ri) => {
+    const pairs = row.map((cell, ci) => {
+      const key = hasHeader ? (headers[ci] || `열${ci + 1}`) : `열${ci + 1}`;
+      return `${key}: ${cell.text || '(없음)'}`;
+    });
+    lines.push(`${ri + 1}행. ${pairs.join(' / ')}`);
+  });
+
+  return lines.join('\n');
+}
+
+// ── Copy ──────────────────────────────────────────────────────────────────────
+copyBtn.addEventListener('click', async () => {
+  const text = codeOutput.textContent;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Fallback for non-secure contexts
+    const ta = Object.assign(document.createElement('textarea'), {
+      value: text, style: 'position:fixed;opacity:0'
+    });
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+  }
+  copyBtn.textContent = '복사됨!';
+  copyBtn.classList.add('success');
+  setTimeout(() => { copyBtn.textContent = '복사'; copyBtn.classList.remove('success'); }, 1500);
+});
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function esc(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function showError(msg) {
+  const div = Object.assign(document.createElement('div'), {
+    className: 'error-toast', textContent: msg
+  });
+  document.body.appendChild(div);
+  setTimeout(() => div.remove(), 5000);
+}
+</script>
+</body>
+</html>
