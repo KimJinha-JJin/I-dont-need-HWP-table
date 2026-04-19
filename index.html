@@ -577,29 +577,40 @@ async function parseHwp(buffer) {
   const isCompressed = (flags & 0x1) !== 0;
 
   const result = [];
+  let sectionCount = 0;
   for (let idx = 0; idx < 512; idx++) {
     const entry = CFB.find(cfb, `/BodyText/Section${idx}`);
     if (!entry || !entry.content || entry.content.length === 0) break;
+    sectionCount++;
 
     let data = new Uint8Array(entry.content);
     if (isCompressed) {
-      try { data = pako.inflate(data); }
-      catch (e) { console.warn(`Section${idx} 압축 해제 실패`, e); continue; }
+      try { data = new Uint8Array(pako.inflate(data)); }
+      catch (e) { console.warn(`[HWP] Section${idx} 압축 해제 실패`, e); continue; }
     }
 
-    result.push(...hwpSectionTables(data));
+    result.push(...hwpSectionTables(data, idx));
+  }
+
+  if (sectionCount === 0) {
+    console.warn('[HWP] BodyText/Section 스트림 없음. 사용 가능한 CFB 경로:', cfb.FullPaths?.slice(0, 30));
+  } else {
+    console.log(`[HWP] ${sectionCount}개 섹션 처리 → ${result.length}개 표 발견`);
   }
   return result;
 }
 
 // Parse decompressed HWP section binary → array of tables
-function hwpSectionTables(uint8) {
+function hwpSectionTables(uint8, secIdx = 0) {
   // HWP record header (uint32 LE):  bits[9:0]=tagId  bits[13:10]=level  bits[31:14]=size
   const TAG_PARA_TEXT   = 67;  // HWPTAG_PARA_TEXT
   const TAG_CTRL_HEADER = 71;  // HWPTAG_CTRL_HEADER
   const TAG_LIST_HEADER = 72;  // HWPTAG_LIST_HEADER
-  // ctrl_id 'tbl ' stored as LE uint32 from bytes [0x74,0x62,0x6C,0x20]
-  const CTRL_TABLE = 0x206C6274;
+
+  // HWP table ctrl_id candidates (LE uint32):
+  //   0x206C6274 = bytes [74 62 6C 20] = 'tbl '
+  //   0x67736C74 = bytes [74 6C 73 67] = 'tlsg' (alternate used in some parsers)
+  const CTRL_TABLE_IDS = new Set([0x206C6274, 0x67736C74]);
 
   // 1. Parse record list
   const recs = [];
@@ -609,7 +620,7 @@ function hwpSectionTables(uint8) {
     const h = view.getUint32(pos, true); pos += 4;
     const tagId = h & 0x3FF;
     const level = (h >> 10) & 0xF;
-    let size = h >> 14;
+    let size = h >>> 14;             // ← unsigned shift (fixes sign-extension bug)
     if (size === 0x3FFFF) {
       if (pos + 4 > uint8.length) break;
       size = view.getUint32(pos, true); pos += 4;
@@ -619,14 +630,24 @@ function hwpSectionTables(uint8) {
     pos += size;
   }
 
+  // Debug: log all CTRL_HEADER ctrl_ids so we can identify the table marker
+  const ctrlRecs = recs.filter(r => r.tagId === TAG_CTRL_HEADER && r.size >= 4);
+  console.groupCollapsed(`[HWP] Section${secIdx}: ${recs.length} recs, ${ctrlRecs.length} CTRL_HEADERs`);
+  ctrlRecs.forEach(r => {
+    const id = view.getUint32(r.off, true);
+    const str = String.fromCharCode(uint8[r.off], uint8[r.off+1], uint8[r.off+2], uint8[r.off+3]);
+    console.log(`  lv=${r.level} 0x${id.toString(16).padStart(8,'0')} "${str}"`);
+  });
+  console.groupEnd();
+
   // 2. Walk records; extract tables at CTRL_HEADER with table ctrl_id
   const tables = [];
   let i = 0;
   while (i < recs.length) {
     const rec = recs[i];
     if (rec.tagId === TAG_CTRL_HEADER && rec.size >= 4) {
-      const ctrlId = new DataView(uint8.buffer).getUint32(rec.off, true);
-      if (ctrlId === CTRL_TABLE) {
+      const ctrlId = view.getUint32(rec.off, true);
+      if (CTRL_TABLE_IDS.has(ctrlId)) {
         const tblLevel = rec.level;
         i++;
 
