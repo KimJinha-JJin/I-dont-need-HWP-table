@@ -568,12 +568,12 @@ async function parseHwp(buffer) {
   const hdrEntry = CFB.find(cfb, '/FileHeader');
   if (!hdrEntry || !hdrEntry.content) throw new Error('HWP FileHeader를 찾을 수 없습니다.');
 
-  const hdrBytes = hdrEntry.content;
+  const hdrBytes = new Uint8Array(hdrEntry.content);
   const sig = String.fromCharCode(...hdrBytes.slice(0, 17));
   if (sig !== 'HWP Document File') throw new Error('HWP 파일 서명이 올바르지 않습니다.');
 
   // Compression flag at offset 36 (uint32 LE), bit 0 = compressed
-  const flags = new DataView(hdrBytes.buffer, hdrBytes.byteOffset + 36, 4).getUint32(0, true);
+  const flags = new DataView(hdrBytes.buffer).getUint32(36, true);
   const isCompressed = (flags & 0x1) !== 0;
 
   const result = [];
@@ -581,7 +581,7 @@ async function parseHwp(buffer) {
     const entry = CFB.find(cfb, `/BodyText/Section${idx}`);
     if (!entry || !entry.content || entry.content.length === 0) break;
 
-    let data = entry.content;
+    let data = new Uint8Array(entry.content);
     if (isCompressed) {
       try { data = pako.inflate(data); }
       catch (e) { console.warn(`Section${idx} 압축 해제 실패`, e); continue; }
@@ -603,7 +603,7 @@ function hwpSectionTables(uint8) {
 
   // 1. Parse record list
   const recs = [];
-  const view = new DataView(uint8.buffer, uint8.byteOffset, uint8.byteLength);
+  const view = new DataView(uint8.buffer);
   let pos = 0;
   while (pos + 4 <= uint8.length) {
     const h = view.getUint32(pos, true); pos += 4;
@@ -625,7 +625,7 @@ function hwpSectionTables(uint8) {
   while (i < recs.length) {
     const rec = recs[i];
     if (rec.tagId === TAG_CTRL_HEADER && rec.size >= 4) {
-      const ctrlId = new DataView(uint8.buffer, uint8.byteOffset + rec.off, 4).getUint32(0, true);
+      const ctrlId = new DataView(uint8.buffer).getUint32(rec.off, true);
       if (ctrlId === CTRL_TABLE) {
         const tblLevel = rec.level;
         i++;
@@ -663,7 +663,7 @@ function hwpSectionTables(uint8) {
               curCell = [];
             }
           } else if (r.tagId === TAG_PARA_TEXT && curCell !== null) {
-            const dv = new DataView(uint8.buffer, uint8.byteOffset + r.off, r.size);
+            const dv = new DataView(uint8.buffer, r.off, r.size);
             const txt = hwpParaText(dv, r.size);
             if (txt) curCell.push(txt);
           }
